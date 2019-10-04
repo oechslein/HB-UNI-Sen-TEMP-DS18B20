@@ -7,8 +7,8 @@
 // define this to read the device id, serial and device type from bootloader section
 // #define USE_OTA_BOOTLOADER
 
-//#define USE_LCD
-//#define LCD_ADDRESS 0x3f
+#define USE_LCD
+#define LCD_ADDRESS 0x3f
 
 #define EI_NOTEXTERNAL
 #include <EnableInterrupt.h>
