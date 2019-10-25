@@ -8,7 +8,7 @@
 // #define USE_OTA_BOOTLOADER
 
 #define USE_LCD
-#define LCD_ADDRESS 0x3f
+#define LCD_ADDRESS 0x27
 
 #define EI_NOTEXTERNAL
 #include <EnableInterrupt.h>
@@ -31,6 +31,8 @@ LiquidCrystal_I2C lcd(LCD_ADDRESS, 20, 4);
 // Arduino pin for the config button
 #define CONFIG_BUTTON_PIN 8
 #define LED_PIN           4
+#define LCD_BACKLIGHT_PIN 7
+#define LCD_ON_PIN 6
 
 // number of available peers per channel
 #define PEERS_PER_CHANNEL 6
@@ -120,6 +122,8 @@ class UList1 : public RegList1<UReg1> {
 };
 
 int32_t Offsets[MAX_SENSORS];
+int16_t temperatures[MAX_SENSORS];
+static const int16_t INVALID_TEMPERATURE = -555;
 
 
 class WeatherEventMsg : public Message {
@@ -183,21 +187,12 @@ class UType : public MultiChannelDevice<Hal, WeatherChannel, MAX_SENSORS, UList0
           DPRINT(F("Temperaturen: | "));
           for (int i = 0; i < MAX_SENSORS; i++) {
             DDEC(sensors[i].temperature()); DPRINT(" | ");
-#ifdef USE_LCD
-            uint8_t x = (i % 2 == 0 ? 0 : 10);
-            uint8_t y = i / 2;
-            lcd.setCursor(x, y);
 
-            String s_temp = " --.-";
             if ((i + 1) <= sensorcount) {
-              s_temp = (String)((float)sensors[i].temperature() / 10.0);
-              s_temp = s_temp.substring(0, s_temp.length() - 1);
-              if (sensors[i].temperature() < 1000 && sensors[i].temperature() >= 0) s_temp = " " + s_temp;
+              temperatures[i] = sensors[i].temperature();
+            } else {
+              temperatures[i] = INVALID_TEMPERATURE;
             }
-            String disp_temp = String(i + 1) + ":" + s_temp + (char)223 + "C ";
-
-            lcd.print(disp_temp);
-#endif
           }
           DPRINTLN("");
           WeatherEventMsg& msg = (WeatherEventMsg&)dev.message();
@@ -239,8 +234,8 @@ class UType : public MultiChannelDevice<Hal, WeatherChannel, MAX_SENSORS, UList0
       sensarray.sensorcount = Ds18b20::init(oneWire, sensarray.sensors, MAX_SENSORS);
       DPRINT("Found "); DDEC(sensarray.sensorcount); DPRINTLN(" DS18B20 Sensors");
 #ifdef USE_LCD
-      lcd.setCursor(2, 3);
-      lcd.print("Found Sensors: " + String(sensarray.sensorcount));
+      //lcd.setCursor(2, 3);
+      //lcd.print("Found Sensors: " + String(sensarray.sensorcount));
 #endif
       sensarray.set(seconds2ticks(5));
       sysclock.add(sensarray);
@@ -250,22 +245,78 @@ class UType : public MultiChannelDevice<Hal, WeatherChannel, MAX_SENSORS, UList0
 UType sdev(devinfo, 0x20);
 ConfigButton<UType> cfgBtn(sdev);
 
+void i2c_scanner() {
+  Wire.begin();
+
+  byte error, address;
+  int nDevices;
+ 
+  Serial.println("Scanning...");
+ 
+  nDevices = 0;
+  for(address = 1; address < 127; address++ )
+  {
+    // The i2c_scanner uses the return value of
+    // the Write.endTransmisstion to see if
+    // a device did acknowledge to the address.
+    Wire.beginTransmission(address);
+    error = Wire.endTransmission();
+ 
+    if (error == 0)
+    {
+      Serial.print("I2C device found at address 0x");
+      if (address<16)
+        Serial.print("0");
+      Serial.print(address,HEX);
+      Serial.println("  !");
+ 
+      nDevices++;
+    }
+    else if (error==4)
+    {
+      Serial.print("Unknown error at address 0x");
+      if (address<16)
+        Serial.print("0");
+      Serial.println(address,HEX);
+    }    
+  }
+  if (nDevices == 0)
+    Serial.println("No I2C devices found\n");
+  else
+    Serial.println("done\n");
+}
+
+volatile static bool backlight_on = false;
+void lcd_on_button_pressed() {
+  backlight_on = true;
+}
+
 void setup () {
   DINIT(57600, ASKSIN_PLUS_PLUS_IDENTIFIER);
   memset(Offsets, 0, MAX_SENSORS);
   DDEVINFO(sdev);
 
+  pinMode(LCD_BACKLIGHT_PIN, OUTPUT);
+
+  for (int i = 0; i < MAX_SENSORS; i++) {
+    temperatures[i] = INVALID_TEMPERATURE;
+  }
+
 #ifdef USE_LCD
+  //i2c_scanner();
   lcd.init();
   lcd.backlight();
   lcd.setCursor(0, 0);
   lcd.print("UNI-Sen-TEMP-DS18B20");
-  lcd.setCursor(5, 1);
+  lcd.setCursor(3, 1);
   lcd.print((char*)serial);
   HMID temp;
   sdev.getDeviceID(temp);
-  lcd.setCursor(7, 2);
+  lcd.setCursor(5, 2);
   lcd.print(temp, HEX);
+
+  pinMode(LCD_ON_PIN, INPUT_PULLUP);
+  enableInterrupt(LCD_ON_PIN, lcd_on_button_pressed, CHANGE);
 #endif
 
   sdev.init(hal);
@@ -274,8 +325,46 @@ void setup () {
 }
 
 void loop() {
+  static unsigned long last_lcd_update = millis();  // while sleeping timer also stops
+  static bool first_page = true;
+
   bool worked = hal.runready();
   bool poll = sdev.pollRadio();
+
+  digitalWrite(LCD_BACKLIGHT_PIN, backlight_on ? HIGH : LOW);
+
+
+#ifdef USE_LCD
+    bool all_temp_unset = true;
+    for (int i = 0; i < MAX_SENSORS; i++) {
+      if (temperatures[i] != INVALID_TEMPERATURE) all_temp_unset = false;
+    }
+
+  if (!all_temp_unset && !worked && !poll) {
+    int start_i = first_page ? 0 : 4;
+    for (int i = start_i; i < min(start_i + 4, MAX_SENSORS); i++) {
+      uint8_t x = (i % 2 == 0 ? 0 : 8);
+      uint8_t y = (i - start_i) / 2;
+      lcd.setCursor(x, y);
+
+      String s_temp = " --.-";
+      if (temperatures[i] != INVALID_TEMPERATURE) {
+        s_temp = (String)((float)temperatures[i] / 10.0);
+        s_temp = s_temp.substring(0, s_temp.length() - 1);
+        if (temperatures[i] < 1000 && temperatures[i] >= 0) s_temp = " " + s_temp;
+      }
+      String disp_temp = String(i + 1) + ":" + s_temp + "  ";
+      lcd.print(disp_temp);
+    }
+    first_page = !first_page;
+    last_lcd_update = millis();
+  }
+#endif  
+
+  if (worked) {
+      backlight_on = false;
+  }
+
   if ( worked == false && poll == false ) {
     if ( hal.battery.critical() ) {
       hal.activity.sleepForever(hal);
