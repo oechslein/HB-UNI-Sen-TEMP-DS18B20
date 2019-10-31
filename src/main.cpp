@@ -33,6 +33,7 @@ LiquidCrystal_I2C lcd(LCD_ADDRESS, 20, 4);
 #define LED_PIN           4
 #define LCD_BACKLIGHT_PIN 7
 #define LCD_ON_PIN 6
+#define LCD_ON_VCC_PIN 5
 
 // number of available peers per channel
 #define PEERS_PER_CHANNEL 6
@@ -286,9 +287,13 @@ void i2c_scanner() {
     Serial.println("done\n");
 }
 
+static const int BACKLIGHT_STAY_ON_SECS = 10UL;
 volatile static bool backlight_on = false;
+volatile static unsigned long backlight_on_ticks = 0;
 void lcd_on_button_pressed() {
+  Serial.println("lcd_on_button_pressed pressed\n");
   backlight_on = true;
+  backlight_on_ticks = millis();
 }
 
 void setup () {
@@ -296,27 +301,30 @@ void setup () {
   memset(Offsets, 0, MAX_SENSORS);
   DDEVINFO(sdev);
 
-  pinMode(LCD_BACKLIGHT_PIN, OUTPUT);
-
   for (int i = 0; i < MAX_SENSORS; i++) {
     temperatures[i] = INVALID_TEMPERATURE;
   }
 
 #ifdef USE_LCD
+  pinMode(LCD_BACKLIGHT_PIN, OUTPUT);
+  digitalWrite(LCD_BACKLIGHT_PIN, HIGH);
+  pinMode(LCD_ON_VCC_PIN, OUTPUT);
+  digitalWrite(LCD_ON_VCC_PIN, LOW);
+
   //i2c_scanner();
   lcd.init();
   lcd.backlight();
-  lcd.setCursor(0, 0);
-  lcd.print("UNI-Sen-TEMP-DS18B20");
-  lcd.setCursor(3, 1);
+  lcd.setCursor(3, 0);
   lcd.print((char*)serial);
   HMID temp;
   sdev.getDeviceID(temp);
-  lcd.setCursor(5, 2);
+  lcd.setCursor(5, 1);
   lcd.print(temp, HEX);
 
+  lcd_on_button_pressed();
+
   pinMode(LCD_ON_PIN, INPUT_PULLUP);
-  enableInterrupt(LCD_ON_PIN, lcd_on_button_pressed, CHANGE);
+  enableInterrupt(LCD_ON_PIN, lcd_on_button_pressed, RISING);
 #endif
 
   sdev.init(hal);
@@ -324,46 +332,81 @@ void setup () {
   sdev.initDone();
 }
 
-void loop() {
-  static unsigned long last_lcd_update = millis();  // while sleeping timer also stops
-  static bool first_page = true;
-
-  bool worked = hal.runready();
-  bool poll = sdev.pollRadio();
-
-  digitalWrite(LCD_BACKLIGHT_PIN, backlight_on ? HIGH : LOW);
-
-
 #ifdef USE_LCD
+void loop_lcd() {
+  static const int PAGE_STAY_SECS = 2;
+  static unsigned long last_lcd_update = millis();  // while sleeping timer also stops
+  static bool first_page = false;
+
+  if (backlight_on
+      && (// overflow sets backlight to false
+          (millis() < backlight_on_ticks) 
+           // or of BACKLIGHT_STAY_ON_SECS reached
+           || (millis() > (backlight_on_ticks + BACKLIGHT_STAY_ON_SECS * 1000)))) {
+    Serial.println("Switch off backlight");
+    Serial.println(millis() < backlight_on_ticks);
+    Serial.println(millis() > (backlight_on_ticks + BACKLIGHT_STAY_ON_SECS * 1000));
+    backlight_on = false;
+  }
+
+  if (!backlight_on) {
+    digitalWrite(LCD_BACKLIGHT_PIN, LOW);
+    lcd.clear();
+    first_page = false;
+  } else {
+    hal.activity.stayAwake(seconds2ticks(BACKLIGHT_STAY_ON_SECS));
+
+    /*
+    Serial.print("millis: "); Serial.println(millis());
+    Serial.print("backlight_on_ticks: "); Serial.println(backlight_on_ticks);
+    Serial.print("backlight_on_ticks + seconds2ticks(BACKLIGHT_STAY_ON_SECS): "); Serial.println(backlight_on_ticks + BACKLIGHT_STAY_ON_SECS * 1000);
+    Serial.print("last_lcd_update: "); Serial.println(last_lcd_update);
+    Serial.print("last_lcd_update + seconds2ticks(1): "); Serial.println(last_lcd_update + PAGE_STAY_SECS * 1000);
+    */
+
+    digitalWrite(LCD_BACKLIGHT_PIN, HIGH);
     bool all_temp_unset = true;
     for (int i = 0; i < MAX_SENSORS; i++) {
       if (temperatures[i] != INVALID_TEMPERATURE) all_temp_unset = false;
     }
 
-  if (!all_temp_unset && !worked && !poll) {
-    int start_i = first_page ? 0 : 4;
-    for (int i = start_i; i < min(start_i + 4, MAX_SENSORS); i++) {
-      uint8_t x = (i % 2 == 0 ? 0 : 8);
-      uint8_t y = (i - start_i) / 2;
-      lcd.setCursor(x, y);
-
-      String s_temp = " --.-";
-      if (temperatures[i] != INVALID_TEMPERATURE) {
-        s_temp = (String)((float)temperatures[i] / 10.0);
-        s_temp = s_temp.substring(0, s_temp.length() - 1);
-        if (temperatures[i] < 1000 && temperatures[i] >= 0) s_temp = " " + s_temp;
-      }
-      String disp_temp = String(i + 1) + ":" + s_temp + "  ";
-      lcd.print(disp_temp);
+    if (// overflow changes first_page
+        (millis() < last_lcd_update) 
+        // or if one second reached
+        || (millis() > (last_lcd_update + PAGE_STAY_SECS * 1000))) {
+        first_page = !first_page;
+        last_lcd_update = millis();
     }
-    first_page = !first_page;
-    last_lcd_update = millis();
-  }
-#endif  
 
-  if (worked) {
-      backlight_on = false;
+    if (!all_temp_unset) {
+      int start_i = first_page ? 0 : 4;
+      for (int i = start_i; i < min(start_i + 4, MAX_SENSORS); i++) {
+        uint8_t x = (i % 2 == 0 ? 0 : 8);
+        uint8_t y = (i - start_i) / 2;
+        lcd.setCursor(x, y);
+
+        String s_temp = " --.-";
+        if (temperatures[i] != INVALID_TEMPERATURE) {
+          s_temp = (String)((float)temperatures[i] / 10.0);
+          s_temp = s_temp.substring(0, s_temp.length() - 1);
+          if (temperatures[i] < 1000 && temperatures[i] >= 0) s_temp = " " + s_temp;
+        }
+        String disp_temp = String(i + 1) + ":" + s_temp + "  ";
+        lcd.print(disp_temp);
+      }
+    }
   }
+}
+#endif  // ifdef USE_LCD
+
+void loop() {
+
+  bool worked = hal.runready();
+  bool poll = sdev.pollRadio();
+
+#ifdef USE_LCD
+  loop_lcd();
+#endif  
 
   if ( worked == false && poll == false ) {
     if ( hal.battery.critical() ) {
