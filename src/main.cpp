@@ -31,9 +31,10 @@ LiquidCrystal_I2C lcd(LCD_ADDRESS, 20, 4);
 // Arduino pin for the config button
 #define CONFIG_BUTTON_PIN 8
 #define LED_PIN           4
-#define LCD_BACKLIGHT_PIN 7
-#define LCD_ON_PIN 6
-#define LCD_ON_VCC_PIN 5
+
+#define LCD_BACKLIGHT_PIN 7 // USed to enable / disable LCD backlight
+#define LCD_ON_PIN 6        // Enables LCD per interrupt
+#define LCD_ON_VCC_PIN 5    // Always LOW used for LCD_ON_PIN
 
 // number of available peers per channel
 #define PEERS_PER_CHANNEL 6
@@ -287,7 +288,6 @@ void i2c_scanner() {
     Serial.println("done\n");
 }
 
-static const int BACKLIGHT_STAY_ON_SECS = 10UL;
 volatile static bool backlight_on = false;
 volatile static unsigned long backlight_on_ticks = 0;
 void lcd_on_button_pressed() {
@@ -334,7 +334,8 @@ void setup () {
 
 #ifdef USE_LCD
 void loop_lcd() {
-  static const int PAGE_STAY_SECS = 2;
+  static const int unsigned PAGE_STAY_SECS = 4;
+  static const int unsigned BACKLIGHT_STAY_ON_SECS = PAGE_STAY_SECS * 2 * 5;
   static unsigned long last_lcd_update = millis();  // while sleeping timer also stops
   static bool first_page = false;
 
@@ -342,10 +343,10 @@ void loop_lcd() {
       && (// overflow sets backlight to false
           (millis() < backlight_on_ticks) 
            // or of BACKLIGHT_STAY_ON_SECS reached
-           || (millis() > (backlight_on_ticks + BACKLIGHT_STAY_ON_SECS * 1000)))) {
+           || (millis() > (backlight_on_ticks + BACKLIGHT_STAY_ON_SECS * 1000UL)))) {
     Serial.println("Switch off backlight");
     Serial.println(millis() < backlight_on_ticks);
-    Serial.println(millis() > (backlight_on_ticks + BACKLIGHT_STAY_ON_SECS * 1000));
+    Serial.println(millis() > (backlight_on_ticks + BACKLIGHT_STAY_ON_SECS * 1000UL));
     backlight_on = false;
   }
 
@@ -387,11 +388,11 @@ void loop_lcd() {
 
         String s_temp = " --.-";
         if (temperatures[i] != INVALID_TEMPERATURE) {
-          s_temp = (String)((float)temperatures[i] / 10.0);
-          s_temp = s_temp.substring(0, s_temp.length() - 1);
+          s_temp = (String)round((float)(temperatures[i] + Offsets[i]) / 10.0);
+          //s_temp = s_temp.substring(0, s_temp.length() - 1);
           if (temperatures[i] < 1000 && temperatures[i] >= 0) s_temp = " " + s_temp;
         }
-        String disp_temp = String(i + 1) + ":" + s_temp + "  ";
+        String disp_temp = String(i + 1) + ":" + s_temp + (char)223 + "C " + "  ";
         lcd.print(disp_temp);
       }
     }
